@@ -1,0 +1,10 @@
+{
+  "description": "This AI-powered business intelligence tool integrates with monday.com to provide quick, accurate insights from messy data, helping executives make informed decisions.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
