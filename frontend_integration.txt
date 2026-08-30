@@ -1,0 +1,266 @@
+Skylark Founder BI Copilot — Frontend Integration Contract
+Version: 0.1 (target HTTP contract)
+Last reviewed: 2026-08-30
+
+IMPORTANT CURRENT STATUS
+------------------------
+The current project is a Streamlit application, not an HTTP API service.
+There is no main.py, FastAPI/Flask server, router, or JSON endpoint in this
+repository today. The existing UI calls BIAgent.send_message() in-process and
+receives a plain text response.
+
+Therefore, the endpoints below are the contract to implement in a backend API
+adapter before a separate frontend integrates. A frontend MUST NOT invent
+endpoints or call Monday.com directly.
+
+Current backend capabilities available for the API adapter:
+- get_available_boards()
+- get_board_schema(board_id)
+- fetch_board_data_sample(board_id)
+- calculate_metrics(board_id, group_by_column, sum_column)
+- calculate_pipeline(board_id, group_by_column, weighted, period)
+- get_leadership_update()
+- BIAgent.send_message(message) -> plain-text LLM response
+
+
+ARCHITECTURE
+------------
+Frontend -> Skylark backend API -> Monday.com GraphQL API
+                                  -> Gemini via BIAgent
+
+Never expose MONDAY_API_TOKEN or GEMINI_API_KEY to the browser.
+
+
+BACKEND CONFIGURATION
+---------------------
+Development backend base URL: http://localhost:8000
+Production backend base URL: supplied through the frontend environment
+
+Frontend environment variable (React/Vite example):
+VITE_API_BASE_URL=http://localhost:8000
+
+Prototype authentication: none.
+The backend owns Monday.com and Gemini authentication.
+
+CORS origins to allow:
+- http://localhost:5173 (Vite default)
+- deployed frontend URL
+
+
+STANDARD RESPONSE RULES
+-----------------------
+- Content-Type: application/json
+- Money values are numeric INR values, never pre-formatted strings.
+- Dates use ISO-8601 strings. Date-only values use YYYY-MM-DD.
+- Percentages are 0-100 numbers: 31 means 31%, not 0.31.
+- Chart series use arrays of objects, not maps/dictionaries.
+- All aggregation responses include data-quality information.
+- The frontend formats currency:
+  * below 100,000: INR with standard separators
+  * 100,000 to below 10,000,000: INR lakhs (for example, INR 12.50 L)
+  * 10,000,000 and above: INR crores (for example, INR 1.25 Cr)
+
+Standard error response (non-2xx):
+{
+  "error": {
+    "code": "MONDAY_CONNECTION_FAILED",
+    "message": "Unable to retrieve Work Orders data.",
+    "retryable": true
+  }
+}
+
+Error codes:
+- AUTHENTICATION_ERROR: show a configuration warning; do not retry automatically.
+- MONDAY_CONNECTION_FAILED: show warning banner and a Retry action.
+- RATE_LIMITED: show a retry-after/loading state and Retry action.
+- BOARD_NOT_FOUND: show an explanatory empty state.
+- INVALID_REQUEST: show the message near the relevant filter/input.
+- NO_DATA_FOUND: show an empty state, not an error toast.
+- DATA_QUALITY_ERROR: show results with a prominent caveat.
+- INTERNAL_ERROR: show a generic retryable error; never expose exception details.
+
+
+TARGET ENDPOINTS (NOT YET IMPLEMENTED)
+---------------------------------------
+
+1) Health
+GET /api/health
+
+200 response:
+{
+  "status": "ok",
+  "monday_connected": true,
+  "timestamp": "2026-08-30T11:20:00Z"
+}
+
+2) Monday connection status
+GET /api/monday/status
+
+200 response:
+{
+  "connected": true,
+  "boards": [
+    {"id": "123", "name": "Deals (BI Agent)", "item_count": 84},
+    {"id": "456", "name": "Work Orders (BI Agent)", "item_count": 126}
+  ],
+  "last_refresh": "2026-08-30T11:18:32Z"
+}
+
+3) Chat
+POST /api/chat
+
+Request:
+{
+  "message": "How is our energy pipeline doing this quarter?",
+  "conversation_id": null
+}
+
+Target 200 response:
+{
+  "conversation_id": "uuid-or-opaque-id",
+  "answer": "Energy has INR 15.2 Cr in open pipeline this quarter.",
+  "metrics": {
+    "pipeline": 152000000,
+    "weighted_pipeline": 78000000,
+    "deal_count": 24
+  },
+  "insights": ["Energy represents 36% of open pipeline."],
+  "risks": ["Three opportunities have been inactive for more than 30 days."],
+  "actions": ["Review the three stalled energy opportunities."],
+  "data_quality": {
+    "records_analyzed": 248,
+    "records_excluded": 4,
+    "warnings": ["Four deals have missing deal values."],
+    "confidence": "medium"
+  },
+  "sources": [
+    {"board_id": "123", "board_name": "Deals (BI Agent)", "records_used": 24}
+  ],
+  "visualization": null
+}
+
+Implementation note: the current BIAgent returns only answer text. The API
+adapter must create this structured response; do not claim these fields exist
+until that work is complete.
+
+Conversation behaviour:
+- First message sends conversation_id: null.
+- Backend returns conversation_id.
+- Later messages must return that ID in the request.
+- Current Streamlit/Gemini session memory is in-process only. A separate
+  frontend requires backend-managed conversation storage keyed by this ID.
+- Use normal request/response JSON for this prototype. Do not implement SSE,
+  WebSockets, or token streaming unless the backend explicitly adds it.
+
+4) Executive dashboard
+GET /api/dashboard?period=this_quarter
+
+Supported filter values:
+- period: this_month | this_quarter | last_quarter | ytd | custom
+- start_date and end_date are required when period=custom (YYYY-MM-DD)
+- optional sector, owner, stage, customer, region
+
+200 response:
+{
+  "period": "this_quarter",
+  "kpis": {
+    "pipeline": 420000000,
+    "weighted_pipeline": 187000000,
+    "won_revenue": 92000000,
+    "win_rate": 31,
+    "active_projects": 42,
+    "delayed_projects": 6,
+    "health_score": 78
+  },
+  "sector_breakdown": [{"sector": "Energy", "value": 152000000, "count": 24}],
+  "pipeline_funnel": [{"stage": "Proposal", "count": 18, "value": 89000000}],
+  "revenue_trend": [{"period": "2026-08", "value": 23000000}],
+  "top_risks": [{"title": "Stalled deals", "severity": "high", "count": 3}],
+  "data_quality": {"records_analyzed": 248, "records_excluded": 4, "warnings": []}
+}
+
+5) Pipeline deep dive
+GET /api/pipeline?period=this_quarter&sector=Energy&weighted=false
+
+200 response:
+{
+  "total_pipeline": 420000000,
+  "weighted_pipeline": 187000000,
+  "by_stage": [{"stage": "Lead", "count": 42, "value": 120000000}],
+  "by_sector": [{"sector": "Energy", "count": 24, "value": 152000000}],
+  "by_owner": [{"owner": "OWNER_003", "count": 8, "value": 50000000}],
+  "top_deals": [],
+  "stalled_deals": [],
+  "risk_flags": [],
+  "data_quality": {"records_analyzed": 84, "records_excluded": 2, "warnings": []}
+}
+
+Pipeline definition for this project:
+- Use calculate_pipeline in agent.py.
+- Exclude statuses Won, Lost, Dead, Closed, Cancelled/Canceled.
+- weighted=false returns unweighted open-pipeline value.
+- weighted=true multiplies deal value by Closure Probability.
+- The backend must state which close-date column was used for period filtering.
+
+6) Operations
+GET /api/operations?period=this_quarter
+
+200 response:
+{
+  "total_work_orders": 126,
+  "active": 42,
+  "completed": 63,
+  "pending": 15,
+  "delayed": 6,
+  "backlog_value": 125000000,
+  "by_status": [{"status": "Completed", "count": 63}],
+  "by_sector": [{"sector": "Mining", "count": 24, "value": 50000000}],
+  "delayed_projects": [],
+  "data_quality": {"records_analyzed": 126, "records_excluded": 0, "warnings": []}
+}
+
+7) Leadership updates
+GET /api/leadership/brief
+GET /api/leadership/morning-brief
+GET /api/leadership/qbr?quarter=Q3-2026
+
+All leadership endpoints return the same structured shape:
+{
+  "title": "Leadership Brief",
+  "generated_at": "2026-08-30T11:20:00Z",
+  "headline": "Open pipeline remains concentrated in Energy.",
+  "key_metrics": [],
+  "insights": [],
+  "risks": [],
+  "actions": [],
+  "data_quality": {"records_analyzed": 0, "records_excluded": 0, "warnings": []},
+  "sources": []
+}
+
+
+FRONTEND PAGES
+--------------
+1. Executive Dashboard — KPI cards, funnel, sector chart, risks.
+2. BI Chat — conversation UI using POST /api/chat and conversation_id.
+3. Pipeline Deep Dive — period/sector/owner/stage filters and tables/charts.
+4. Operations — work-order status, backlog, delayed-project views.
+5. Leadership Brief — generate and display printable leadership summaries.
+
+Required UI states for every remote view:
+- Loading: "Retrieving Monday.com data..." then "Running business analysis..."
+- Error: map the standard error code to the behaviour above.
+- Empty: explain that no records matched the selected filters.
+- Data-quality warning: retain results and show the warnings next to them.
+- Freshness: show last_refresh or generated_at near dashboard/brief results.
+
+
+IMPLEMENTATION CHECKLIST FOR BACKEND API ADAPTER
+------------------------------------------------
+- Add a FastAPI (or equivalent) main.py and Pydantic request/response schemas.
+- Keep existing Monday and Gemini calls server-side.
+- Add CORS for local and production frontend origins.
+- Convert current tool output from Markdown/plain text into typed JSON objects.
+- Store conversation state server-side by conversation_id, or document stateless
+  chat explicitly.
+- Do not mock missing API data in the frontend; return NO_DATA_FOUND instead.
+- Add endpoint tests for success, no data, Monday errors, rate limits, and CORS.

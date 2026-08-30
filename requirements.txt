@@ -1,0 +1,12 @@
+streamlit
+pandas
+openpyxl
+requests
+python-dotenv
+google-genai
+tenacity
+tabulate
+pytest
+fastapi
+uvicorn
+httpx
